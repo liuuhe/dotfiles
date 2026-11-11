@@ -1,0 +1,6 @@
+# Personal Squirrel appearance settings; keep these separate from upstream files.
+patch:
+  style/candidate_list_layout: linear
+  preset_color_schemes/purity_of_form_custom/corner_radius: 4
+  preset_color_schemes/purity_of_form_custom/font_point: 15
+  preset_color_schemes/purity_of_form_custom/comment_font_point: 15
