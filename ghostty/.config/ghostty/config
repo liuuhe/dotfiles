@@ -5,8 +5,8 @@ font-family = Cascadia Code
 cursor-style = bar
 cursor-style-blink = false
 
-keybind = super+k=previous_tab
-keybind = super+j=next_tab
+keybind = super+h=previous_tab
+keybind = super+l=next_tab
 
 # Everforest dark medium 
 background = #2d353b
