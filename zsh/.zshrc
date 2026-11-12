@@ -1,3 +1,14 @@
+# Make Homebrew available even before a new machine has a .zprofile.
+if ! command -v brew &> /dev/null; then
+  for brew_path in /opt/homebrew/bin/brew /usr/local/bin/brew; do
+    if [[ -x "$brew_path" ]]; then
+      eval "$("$brew_path" shellenv)"
+      break
+    fi
+  done
+  unset brew_path
+fi
+
 export MANPAGER="nvim +Man!"
 export EDITOR="nvim"
 
@@ -42,8 +53,16 @@ function y() {
 }
 
 # Load antidote plugins
-source $(brew --prefix antidote)/share/antidote/antidote.zsh
-antidote load
+if command -v brew &> /dev/null; then
+  antidote_path="$(brew --prefix antidote 2>/dev/null)/share/antidote/antidote.zsh"
+  if [[ -r "$antidote_path" ]]; then
+    source "$antidote_path"
+  fi
+  unset antidote_path
+fi
+if command -v antidote &> /dev/null; then
+  antidote load
+fi
 
 # Load starship
 if command -v starship &> /dev/null; then
