@@ -162,6 +162,7 @@ function config.start()
 	config.errors = {}
 	startModule("screenshot")
 	startModule("global")
+	startModule("rime")
 	attempt("apps discovery", startApps)
 	attempt("application watcher", function()
 		config.appWatcher = hs.application.watcher.new(function(_, event, app)
