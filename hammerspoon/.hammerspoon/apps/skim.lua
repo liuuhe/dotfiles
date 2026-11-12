@@ -482,6 +482,19 @@ M.hotkeys = {
 	{ mods = { "cmd" }, key = "d", action = toggleSmartInvert },
 	{ mods = { "cmd" }, key = "j", action = selectMenu({ "Go", "Next" }) },
 	{ mods = { "cmd" }, key = "k", action = selectMenu({ "Go", "Previous" }) },
+	{
+		mods = { "cmd" },
+		key = "t",
+		action = function()
+			local app = hs.application.frontmostApplication()
+			if not app then
+				return
+			end
+			if not app:selectMenuItem({ "View", "Show Contents Pane" }) then
+				app:selectMenuItem({ "View", "Hide Contents Pane" })
+			end
+		end,
+	},
 }
 
 return M
