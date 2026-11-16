@@ -54,6 +54,7 @@ function M.validate(bindings)
 		end
 		assert(type(binding.key) == "string" and binding.key ~= "", label .. ".key must be a non-empty string")
 		assert(type(binding.action) == "function", label .. ".action must be a function")
+		assert(binding.repeatable == nil or type(binding.repeatable) == "boolean", label .. ".repeatable must be a boolean")
 	end
 end
 
@@ -75,7 +76,13 @@ function M.create(bindings, scope)
 	local result = {}
 	local ok, message = xpcall(function()
 		for _, binding in ipairs(bindings) do
-			local hotkey = hs.hotkey.new(binding.mods, binding.key, binding.action)
+			local hotkey = hs.hotkey.new(
+				binding.mods,
+				binding.key,
+				binding.action,
+				nil,
+				binding.repeatable and binding.action or nil
+			)
 			assert(hotkey, "Could not create hotkey: " .. scope .. " / " .. binding.key)
 			result[#result + 1] = hotkey
 		end

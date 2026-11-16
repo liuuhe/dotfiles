@@ -1,4 +1,3 @@
-local selectMenu = require("hotkeys").selectMenu
 local bundleID = "net.sourceforge.skim-app.skim"
 local log = hs.logger.new("skim", "info")
 local M = { bundleID = bundleID }
@@ -478,10 +477,20 @@ function M.stop()
 	end
 end
 
+local function pageKey(key)
+	return function()
+		local app = hs.application.frontmostApplication()
+		if app and app:bundleID() == bundleID then
+			-- Send only Option, with no default keystroke delay.
+			hs.eventtap.keyStroke({ "alt" }, key, 0, app)
+		end
+	end
+end
+
 M.hotkeys = {
 	{ mods = { "cmd" }, key = "d", action = toggleSmartInvert },
-	{ mods = { "cmd" }, key = "j", action = selectMenu({ "Go", "Next" }) },
-	{ mods = { "cmd" }, key = "k", action = selectMenu({ "Go", "Previous" }) },
+	{ mods = { "cmd" }, key = "j", action = pageKey("down"), repeatable = true },
+	{ mods = { "cmd" }, key = "k", action = pageKey("up"), repeatable = true },
 	{
 		mods = { "cmd" },
 		key = "t",
