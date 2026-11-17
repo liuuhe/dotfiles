@@ -4,7 +4,7 @@ require("config.options")
 require("config.keymaps")
 require("config.autocmds")
 
-require("plugins.colorscheme")
+vim.cmd.colorscheme("habamax")
 
 local plugin_path = vim.fn.stdpath("config") .. "/lua/plugins"
 
