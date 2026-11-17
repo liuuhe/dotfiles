@@ -5,7 +5,9 @@ local running = false
 
 local function reportError(message)
 	log.e(message)
-	hs.notify.new({ title = "Rime update failed", informativeText = "See Hammerspoon Console. Will retry later." }):send()
+	hs.notify
+		.new({ title = "Rime update failed", informativeText = "See Hammerspoon Console. Will retry later." })
+		:send()
 end
 
 function M.start()

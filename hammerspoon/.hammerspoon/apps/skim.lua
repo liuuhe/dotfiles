@@ -1,7 +1,7 @@
 local bundleID = "net.sourceforge.skim-app.skim"
 local log = hs.logger.new("skim", "info")
 local M = { bundleID = bundleID }
-local state = { enabled = true, running = false, cache = {}, errors = {}, versions = {}, pendingUpdate = false }
+local state = { mode = "enabled", running = false, documents = {}, errors = {}, pendingUpdate = false }
 local updateSmartInvert
 
 local function notify(message)
@@ -67,9 +67,13 @@ local function runScript(script, arguments, timeout, callback, cleanup)
 			state.request = nil
 		end
 		if state.running and not request.cancelled then
-			local ok, message = xpcall(function()
-				callback(exitCode, stdout or "", request.timedOut and "AppleScript timed out." or (stderr or ""))
-			end, debug.traceback)
+			local ok, message = xpcall(
+				callback,
+				debug.traceback,
+				exitCode,
+				stdout or "",
+				request.timedOut and "AppleScript timed out." or (stderr or "")
+			)
 			if not ok then
 				reportError("Smart Invert encountered an error. See Hammerspoon Console.", message)
 			end
@@ -97,9 +101,7 @@ local function runScript(script, arguments, timeout, callback, cleanup)
 		task:terminate()
 		finish(-1, "", "AppleScript timed out.")
 	end)
-	local started, result = pcall(function()
-		return task:start()
-	end)
+	local started, result = pcall(task.start, task)
 	if not started or not result then
 		finish(-1, "", started and "Could not start AppleScript task." or tostring(result))
 	end
@@ -171,8 +173,8 @@ local function setInversion(enabled, doc)
 		if exitCode ~= 0 then
 			reportError("Could not update color inversion. Switch documents or return to Skim to retry.", stderr)
 		elseif stdout:match("^true%s*$") then
-			if not enabled then
-				state.pendingDisable = false
+			if state.mode == "disabling" then
+				state.mode = "disabled"
 			end
 		else
 			-- Skim or its front document changed before the write.
@@ -286,7 +288,7 @@ local function failedAnalysis(detail)
 	reportError("Could not analyze this PDF. Switch documents or return to Skim to retry.", detail)
 end
 
-local function analyzeDocument(doc, version)
+local function analyzeDocument(doc, record)
 	local prepared, directory = pcall(os.tmpname)
 	if not prepared then
 		failedAnalysis(directory)
@@ -313,7 +315,7 @@ local function analyzeDocument(doc, version)
 	end
 
 	runScript(exportScript, arguments, 12, function(exitCode, stdout, stderr)
-		if fileVersion(doc) ~= version then
+		if fileVersion(doc) ~= record.version then
 			requestUpdate()
 			return
 		end
@@ -325,22 +327,15 @@ local function analyzeDocument(doc, version)
 			requestUpdate()
 			return
 		end
-		local ok, invert = xpcall(function()
-			local lightPages = 0
-			for _, path in ipairs(files) do
-				if hasLightBackground(path) then
-					lightPages = lightPages + 1
-				end
+		local lightPages = 0
+		for _, path in ipairs(files) do
+			if hasLightBackground(path) then
+				lightPages = lightPages + 1
 			end
-			return lightPages > #files / 2
-		end, debug.traceback)
-		if not ok then
-			failedAnalysis(invert)
-			return
 		end
-		state.cache[doc.path] = { version = version, invert = invert }
-		if state.enabled then
-			setInversion(invert, doc)
+		record.invert = lightPages > #files / 2
+		if state.mode == "enabled" then
+			setInversion(record.invert, doc)
 		end
 	end, cleanup)
 end
@@ -351,23 +346,19 @@ local function processDocument(doc)
 		return
 	end
 	local now = hs.timer.secondsSinceEpoch()
-	local observed = state.versions[doc.path]
-	if not observed or observed.version ~= version then
+	local record = state.documents[doc.path]
+	if not record or record.version ~= version then
 		-- New documents can be analyzed immediately; updated files must settle.
-		observed = { version = version, readyAt = observed and (now + 0.75) or now }
-		state.versions[doc.path] = observed
+		record = { version = version, readyAt = record and (now + 0.75) or now }
+		state.documents[doc.path] = record
 	end
-	local cached = state.cache[doc.path]
-	if cached and cached.version == version then
-		setInversion(cached.invert, doc)
-		return
-	end
-	-- Keep the current appearance until the final document result is available.
-	if now >= observed.readyAt then
-		analyzeDocument(doc, version)
+	if record.invert ~= nil then
+		setInversion(record.invert, doc)
+	elseif now >= record.readyAt then
+		analyzeDocument(doc, record)
 	else
-		-- One follow-up for this file change; no periodic polling is needed.
-		state.refresh:start(observed.readyAt - now)
+		-- Preserve the current appearance and retry once the file has settled.
+		state.refresh:start(record.readyAt - now)
 	end
 end
 
@@ -384,10 +375,10 @@ updateSmartInvert = function()
 	if not isFrontmost() then
 		return
 	end
-	if not state.enabled then
-		if state.pendingDisable then
-			setInversion(false)
-		end
+	if state.mode == "disabling" then
+		setInversion(false)
+		return
+	elseif state.mode == "disabled" then
 		return
 	end
 	runScript(queryScript, {}, 3, function(exitCode, stdout, stderr)
@@ -395,7 +386,7 @@ updateSmartInvert = function()
 			reportError("Could not read the current PDF. Switch documents or return to Skim to retry.", stderr)
 			return
 		end
-		if not state.enabled or not isFrontmost() then
+		if state.mode ~= "enabled" or not isFrontmost() then
 			return
 		end
 		-- Remove osascript's final newline only; the path may contain newlines.
@@ -422,11 +413,10 @@ local function toggleSmartInvert()
 	end
 	state.pendingUpdate = false
 	cancelRequest()
-	state.enabled = not state.enabled
+	state.mode = state.mode == "enabled" and "disabling" or "enabled"
 	state.errors = {}
-	state.pendingDisable = not state.enabled
 	updateSmartInvert()
-	notify(state.enabled and "Smart Invert enabled" or "Smart Invert disabled")
+	notify(state.mode == "enabled" and "Smart Invert enabled" or "Smart Invert disabled")
 end
 
 function M.start()
@@ -436,7 +426,9 @@ function M.start()
 	state.running = true
 	state.errors = {}
 	state.pendingUpdate = false
-	state.pendingDisable = not state.enabled
+	if state.mode == "disabled" then
+		state.mode = "disabling"
+	end
 	state.refresh = hs.timer.delayed.new(0.05, updateSmartInvert)
 
 	-- Defer event callbacks briefly so Skim can update its front document.

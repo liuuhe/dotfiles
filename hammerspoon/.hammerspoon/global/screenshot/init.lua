@@ -4,7 +4,8 @@ local pictures = os.getenv("HOME") .. "/Pictures"
 local directory = pictures .. "/Screenshot"
 local openDirectoryTag = "open-screenshot-directory"
 local started = false
-local executable = os.getenv("HOME") .. "/Library/Application Support/Hammerspoon/ScreenshotPicker.app/Contents/MacOS/ScreenshotPicker"
+local executable = os.getenv("HOME")
+	.. "/Library/Application Support/Hammerspoon/ScreenshotPicker.app/Contents/MacOS/ScreenshotPicker"
 local log = hs.logger.new("screenshot", "info")
 
 local function notify(title, message, callbackTag)
@@ -101,8 +102,6 @@ local function capture(target, kind, rect)
 end
 
 local picker
-local queuedKind
-local beginNext
 
 local function selectionError(message, detail)
 	if detail and detail ~= "" then
@@ -150,9 +149,12 @@ local function captureSelection(result, kind)
 			return
 		end
 		local frame = screen:fullFrame()
-		if rect.x < frame.x - 0.01 or rect.y < frame.y - 0.01
+		if
+			rect.x < frame.x - 0.01
+			or rect.y < frame.y - 0.01
 			or rect.x + rect.w > frame.x + frame.w + 0.01
-			or rect.y + rect.h > frame.y + frame.h + 0.01 then
+			or rect.y + rect.h > frame.y + frame.h + 0.01
+		then
 			selectionError("The display layout changed. Please select the area again.")
 			return
 		end
@@ -160,12 +162,10 @@ local function captureSelection(result, kind)
 	end
 end
 
-beginNext = function()
-	if not started or picker or not queuedKind then
+local function requestCapture(kind)
+	if not started or picker then
 		return
 	end
-	local kind = queuedKind
-	queuedKind = nil
 	if not canCapture() then
 		return
 	end
@@ -185,29 +185,17 @@ beginNext = function()
 			return
 		end
 		session.task = nil
-		if not started then
-			picker = nil
-			return
-		end
-		-- Wait for overlays to disappear and focus to return before capturing or restarting.
+		-- Keep ignoring requests until the overlays disappear and focus returns.
 		session.timer = hs.timer.doAfter(0.1, function()
 			if picker ~= session then
 				return
 			end
 			picker = nil
-			if not started then
-				return
-			end
-			if queuedKind then
-				beginNext()
-				return
-			end
-			if session.cancelled then
-				return
-			end
 			if exitCode ~= 0 then
-				selectionError("The screenshot picker exited unexpectedly. See Hammerspoon Console.",
-					stderr ~= "" and stderr or ("Exit code: " .. exitCode))
+				selectionError(
+					"The screenshot picker exited unexpectedly. See Hammerspoon Console.",
+					stderr ~= "" and stderr or ("Exit code: " .. exitCode)
+				)
 				return
 			end
 			local decoded, result = pcall(hs.json.decode, stdout)
@@ -229,28 +217,10 @@ beginNext = function()
 	end
 end
 
-local function requestCapture(kind)
-	if not started then
-		return
-	end
-	queuedKind = kind
-	if picker then
-		picker.cancelled = true
-		if picker.task then
-			picker.task:terminate()
-		end
-		-- The completion callback starts the latest request after the old helper exits.
-	else
-		beginNext()
-	end
-end
-
 local function stopPicking()
-	queuedKind = nil
 	local previous = picker
 	picker = nil
 	if previous then
-		previous.cancelled = true
 		if previous.timer then
 			previous.timer:stop()
 		end
