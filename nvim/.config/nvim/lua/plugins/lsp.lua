@@ -13,6 +13,7 @@ require("mason").setup({
 })
 
 require("mason-lspconfig").setup()
+vim.lsp.enable("sourcekit")
 
 require("mason-tool-installer").setup({
   ensure_installed = {
