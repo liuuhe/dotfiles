@@ -16,6 +16,7 @@ require("mason-lspconfig").setup()
 
 require("mason-tool-installer").setup({
   ensure_installed = {
+    "clangd", -- c lsp
     "lua_ls", -- lua lsp
     "stylua", -- lua formatter
     "basedpyright", -- python lsp
