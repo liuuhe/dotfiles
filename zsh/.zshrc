@@ -12,6 +12,8 @@ fi
 export MANPAGER="nvim +Man!"
 export EDITOR="nvim"
 
+autoload -Uz compinit && compinit
+
 # Load zoxide
 if command -v zoxide &> /dev/null; then
   eval "$(zoxide init zsh)"
