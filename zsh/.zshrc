@@ -27,14 +27,6 @@ if command -v lazygit &> /dev/null; then
   alias lg="lazygit"
 fi
 
-# eza alias
-if command -v eza &> /dev/null; then
-  alias ls='eza -lh --group-directories-first --icons=auto'
-  alias la='ls -a'
-  alias lt='eza --tree --level=3 --long --icons --git'
-  alias lta='lt -a'
-fi
-
 # Change directory alias
 alias ..='cd ..'
 alias ...='cd ../..'
