@@ -14,11 +14,29 @@ final class HIDAccess {
     typealias CopyEvent = @convention(c) (CGEvent) -> Unmanaged<CFTypeRef>?
     typealias SenderID = @convention(c) (CFTypeRef) -> UInt64
     typealias SetFloat = @convention(c) (CFTypeRef, UInt32, Double) -> Void
+    typealias CreateClient = @convention(c) (CFAllocator?) -> Unmanaged<IOHIDEventSystemClient>?
+    typealias ServiceBlock = @convention(block) (
+        UnsafeMutableRawPointer?, UnsafeMutableRawPointer?, IOHIDServiceClient?
+    ) -> Void
+    // IOKit retains these blocks. An optional block parameter imports as escaping.
+    typealias RegisterServiceBlock = @convention(c) (
+        IOHIDEventSystemClient, ServiceBlock?, UnsafeMutableRawPointer?, UnsafeMutableRawPointer?
+    ) -> Void
+    typealias UnregisterServiceBlock = @convention(c) (IOHIDEventSystemClient) -> Void
+    typealias ScheduleClient = @convention(c) (IOHIDEventSystemClient, DispatchQueue) -> Void
+    typealias RegisterRemovalBlock = @convention(c) (
+        IOHIDServiceClient, ServiceBlock?, UnsafeMutableRawPointer?, UnsafeMutableRawPointer?
+    ) -> Void
 
     let copyEvent: CopyEvent
     let senderID: SenderID
     let setFloat: SetFloat
-    let client: IOHIDEventSystemClient
+    let createClient: CreateClient
+    let registerService: RegisterServiceBlock
+    let unregisterService: UnregisterServiceBlock
+    let scheduleClient: ScheduleClient
+    let unscheduleClient: ScheduleClient
+    let registerRemoval: RegisterRemovalBlock
     private let symbols: UnsafeMutableRawPointer
 
     init() throws {
@@ -35,25 +53,27 @@ final class HIDAccess {
             copyEvent = try load("CGEventCopyIOHIDEvent", as: CopyEvent.self)
             senderID = try load("IOHIDEventGetSenderID", as: SenderID.self)
             setFloat = try load("IOHIDEventSetFloatValue", as: SetFloat.self)
+            createClient = try load("IOHIDEventSystemClientCreate", as: CreateClient.self)
+            registerService = try load("IOHIDEventSystemClientRegisterDeviceMatchingBlock", as: RegisterServiceBlock.self)
+            unregisterService = try load("IOHIDEventSystemClientUnregisterDeviceMatchingBlock", as: UnregisterServiceBlock.self)
+            scheduleClient = try load("IOHIDEventSystemClientScheduleWithDispatchQueue", as: ScheduleClient.self)
+            unscheduleClient = try load("IOHIDEventSystemClientUnscheduleFromDispatchQueue", as: ScheduleClient.self)
+            registerRemoval = try load("IOHIDServiceClientRegisterRemovalBlock", as: RegisterRemovalBlock.self)
         } catch {
             dlclose(symbols)
             throw error
         }
         self.symbols = symbols
-        client = IOHIDEventSystemClientCreateSimpleClient(kCFAllocatorDefault)
     }
 
     deinit { dlclose(symbols) }
 }
 
-enum DeviceKind {
-    case mouse, trackpad, other
-}
-
 final class MouseScroll {
     private let amount: Double
     private let hid: HIDAccess
-    private var devices: [UInt64: DeviceKind] = [:]
+    private var deviceClient: IOHIDEventSystemClient?
+    private var mice: [UInt64: IOHIDServiceClient] = [:]
     private var tap: CFMachPort?
     private var source: CFRunLoopSource?
     private var signals: [DispatchSourceSignal] = []
@@ -64,41 +84,49 @@ final class MouseScroll {
         hid = try HIDAccess()
     }
 
-    private func kind(for senderID: UInt64) -> DeviceKind? {
-        guard senderID != 0 else { return nil }
-        if let cached = devices[senderID] { return cached }
-        // Failed lookups are not cached: a later event can retry discovery.
-        guard let services = IOHIDEventSystemClientCopyServices(hid.client) as? [IOHIDServiceClient],
-              let service = services.first(where: {
-                  (IOHIDServiceClientGetRegistryID($0) as? NSNumber)?.uint64Value == senderID
-              }) else {
-            return nil
+    private func startDeviceObservation() throws {
+        guard let client = hid.createClient(kCFAllocatorDefault)?.takeRetainedValue() else {
+            throw ScrollError("Could not create the HID device observer.")
         }
+        deviceClient = client
+        hid.registerService(client, { [weak self] _, _, service in
+            if let service { self?.addService(service) }
+        }, nil, nil)
+        // Service callbacks and the scroll event tap both run on the main thread.
+        hid.scheduleClient(client, .main)
+        if let services = IOHIDEventSystemClientCopyServices(client) as? [IOHIDServiceClient] {
+            for service in services { addService(service) }
+        }
+    }
+
+    private func addService(_ service: IOHIDServiceClient) {
+        guard deviceClient != nil,
+              let senderID = (IOHIDServiceClientGetRegistryID(service) as? NSNumber)?.uint64Value,
+              senderID != 0, mice[senderID] == nil, isMouse(service) else { return }
+
+        mice[senderID] = service
+        hid.registerRemoval(service, { [weak self] _, _, removedService in
+            guard let self, let removedService, self.mice[senderID] === removedService else { return }
+            self.mice.removeValue(forKey: senderID)
+        }, nil, nil)
+    }
+
+    private func isMouse(_ service: IOHIDServiceClient) -> Bool {
         let vendor = (IOHIDServiceClientCopyProperty(service, kIOHIDVendorIDKey as CFString) as? NSNumber)?.intValue
         let product = (IOHIDServiceClientCopyProperty(service, kIOHIDProductIDKey as CFString) as? NSNumber)?.intValue
-        let kind: DeviceKind
         // Magic Mouse can also expose touch usages; classify it before touchpads.
         if let vendor, let product, [0x004C, 0x05AC].contains(vendor),
            [0x0269, 0x030D].contains(product) {
-            kind = .mouse
-        } else if IOHIDServiceClientConformsTo(service, UInt32(kHIDPage_Digitizer),
-                                              UInt32(kHIDUsage_Dig_TouchPad)) != 0 {
-            kind = .trackpad
-        } else if IOHIDServiceClientConformsTo(service, UInt32(kHIDPage_GenericDesktop),
-                                              UInt32(kHIDUsage_GD_Mouse)) != 0 {
-            kind = .mouse
-        } else {
-            kind = .other
+            return true
         }
-        // Bound stale entries without maintaining a device-removal observer.
-        if devices.count >= 64 { devices.removeAll(keepingCapacity: true) }
-        devices[senderID] = kind
-        return kind
+        if IOHIDServiceClientConformsTo(service, UInt32(kHIDPage_Digitizer), UInt32(kHIDUsage_Dig_TouchPad)) != 0 {
+            return false
+        }
+        return IOHIDServiceClientConformsTo(service, UInt32(kHIDPage_GenericDesktop), UInt32(kHIDUsage_GD_Mouse)) != 0
     }
 
     private func handle(_ type: CGEventType, _ event: CGEvent) -> Unmanaged<CGEvent>? {
         if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
-            devices.removeAll(keepingCapacity: true)
             if let tap { CGEvent.tapEnable(tap: tap, enable: true) }
             return Unmanaged.passUnretained(event)
         }
@@ -108,7 +136,7 @@ final class MouseScroll {
             : Double(event.getIntegerValueField(.scrollWheelEventDeltaAxis1))
         guard delta.isFinite, delta != 0,
               let hidEvent = hid.copyEvent(event)?.takeRetainedValue(),
-              kind(for: hid.senderID(hidEvent)) == .mouse else {
+              mice[hid.senderID(hidEvent)] != nil else {
             return Unmanaged.passUnretained(event)
         }
 
@@ -159,6 +187,12 @@ final class MouseScroll {
             stop()
             throw ScrollError("The parent process exited during startup.")
         }
+        do {
+            try startDeviceObservation()
+        } catch {
+            stop()
+            throw error
+        }
         CGEvent.tapEnable(tap: tap, enable: true)
     }
 
@@ -174,7 +208,12 @@ final class MouseScroll {
         parentMonitor = nil
         for signalSource in signals { signalSource.cancel() }
         signals.removeAll()
-        devices.removeAll()
+        if let client = deviceClient {
+            deviceClient = nil
+            hid.unregisterService(client)
+            hid.unscheduleClient(client, .main)
+        }
+        mice.removeAll()
         CFRunLoopStop(CFRunLoopGetMain())
     }
 }
