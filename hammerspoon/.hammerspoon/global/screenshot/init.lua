@@ -17,9 +17,18 @@ local function notify(title, message, callbackTag)
 		:send()
 end
 
-local function canCapture()
+local function reportError(save, title, message)
+	if save then
+		notify(title, message)
+	else
+		log.e(title .. ": " .. message)
+	end
+end
+
+local function canCapture(save)
 	if not hs.screenRecordingState() then
-		notify(
+		reportError(
+			save,
 			"Screen Recording permission required",
 			"Enable Hammerspoon in System Settings, then restart Hammerspoon."
 		)
@@ -28,12 +37,12 @@ local function canCapture()
 	return true
 end
 
-local function capture(target, kind, rect)
+local function capture(target, kind, save, rect)
 	if not target then
-		notify("Screenshot failed", "No " .. kind .. " is available.")
+		reportError(save, "Screenshot failed", "No " .. kind .. " is available.")
 		return
 	end
-	if not canCapture() then
+	if not canCapture(save) then
 		return
 	end
 
@@ -58,7 +67,14 @@ local function capture(target, kind, rect)
 	end)
 
 	if not captured or not image then
-		notify("Screenshot failed", "Could not capture the " .. kind .. ".")
+		reportError(save, "Screenshot failed", "Could not capture the " .. kind .. ".")
+		return
+	end
+
+	if not save then
+		if not hs.pasteboard.writeObjects(image) then
+			log.e("Could not copy the screenshot to the clipboard.")
+		end
 		return
 	end
 
@@ -103,49 +119,49 @@ end
 
 local picker
 
-local function selectionError(message, detail)
+local function selectionError(save, message, detail)
 	if detail and detail ~= "" then
 		log.e(detail)
 	end
-	notify("Screenshot selection failed", message)
+	reportError(save, "Screenshot selection failed", message)
 end
 
-local function captureSelection(result, kind)
+local function captureSelection(result, kind, save)
 	if result.status == "cancelled" then
 		if result.reason == "no-windows" then
-			selectionError("No selectable windows are available.")
+			selectionError(save, "No selectable windows are available.")
 		elseif result.reason == "no-display" then
-			selectionError("No display is available.")
+			selectionError(save, "No display is available.")
 		end
 		return
 	end
 	if result.status ~= "selected" or result.mode ~= kind or result.coordinateSystem ~= "macOS-top-left-points" then
-		selectionError("The screenshot picker returned an invalid result.")
+		selectionError(save, "The screenshot picker returned an invalid result.")
 		return
 	end
 	local rect = result.rect
 	for _, field in ipairs({ "x", "y", "w", "h" }) do
 		local value = type(rect) == "table" and rect[field]
 		if type(value) ~= "number" or value ~= value or math.abs(value) == math.huge then
-			selectionError("The screenshot picker returned an invalid selection.")
+			selectionError(save, "The screenshot picker returned an invalid selection.")
 			return
 		end
 	end
 	if rect.w < 2 or rect.h < 2 then
-		selectionError("The selected area is too small.")
+		selectionError(save, "The selected area is too small.")
 		return
 	end
 
 	if kind == "window" then
 		if type(result.windowID) ~= "number" or result.windowID <= 0 or result.windowID % 1 ~= 0 then
-			selectionError("The screenshot picker returned an invalid window.")
+			selectionError(save, "The screenshot picker returned an invalid window.")
 			return
 		end
-		capture(result.windowID, "window")
+		capture(result.windowID, "window", save)
 	else
 		local screen = type(result.screenID) == "number" and hs.screen.find(result.screenID)
 		if not screen then
-			selectionError("The selected display is no longer available.")
+			selectionError(save, "The selected display is no longer available.")
 			return
 		end
 		local frame = screen:fullFrame()
@@ -155,26 +171,26 @@ local function captureSelection(result, kind)
 			or rect.x + rect.w > frame.x + frame.w + 0.01
 			or rect.y + rect.h > frame.y + frame.h + 0.01
 		then
-			selectionError("The display layout changed. Please select the area again.")
+			selectionError(save, "The display layout changed. Please select the area again.")
 			return
 		end
-		capture(screen, "area", screen:absoluteToLocal(rect))
+		capture(screen, "area", save, screen:absoluteToLocal(rect))
 	end
 end
 
-local function requestCapture(kind)
+local function requestCapture(kind, save)
 	if not started or picker then
 		return
 	end
-	if not canCapture() then
+	if not canCapture(save) then
 		return
 	end
 	if kind == "screen" then
-		capture(hs.screen.mainScreen(), "screen")
+		capture(hs.screen.mainScreen(), "screen", save)
 		return
 	end
 	if not hs.fs.attributes(executable) then
-		selectionError("Rebuild the screenshot picker using global/screenshot/build.sh.")
+		selectionError(save, "Rebuild the screenshot picker using global/screenshot/build.sh.")
 		return
 	end
 
@@ -193,6 +209,7 @@ local function requestCapture(kind)
 			picker = nil
 			if exitCode ~= 0 then
 				selectionError(
+					save,
 					"The screenshot picker exited unexpectedly. See Hammerspoon Console.",
 					stderr ~= "" and stderr or ("Exit code: " .. exitCode)
 				)
@@ -200,20 +217,20 @@ local function requestCapture(kind)
 			end
 			local decoded, result = pcall(hs.json.decode, stdout)
 			if not decoded or type(result) ~= "table" then
-				selectionError("The screenshot picker returned an invalid result.", stdout)
+				selectionError(save, "The screenshot picker returned an invalid result.", stdout)
 				return
 			end
 			local ok, message = xpcall(function()
-				captureSelection(result, kind)
+				captureSelection(result, kind, save)
 			end, debug.traceback)
 			if not ok then
-				selectionError("Could not finish the screenshot. See Hammerspoon Console.", message)
+				selectionError(save, "Could not finish the screenshot. See Hammerspoon Console.", message)
 			end
 		end)
 	end, { kind })
 	if not session.task or not session.task:start() then
 		picker = nil
-		selectionError("Could not start the screenshot picker.")
+		selectionError(save, "Could not start the screenshot picker.")
 	end
 end
 
@@ -230,16 +247,16 @@ local function stopPicking()
 	end
 end
 
-function M.window()
-	requestCapture("window")
+function M.window(save)
+	requestCapture("window", save ~= false)
 end
 
-function M.area()
-	requestCapture("area")
+function M.area(save)
+	requestCapture("area", save ~= false)
 end
 
-function M.screen()
-	requestCapture("screen")
+function M.screen(save)
+	requestCapture("screen", save ~= false)
 end
 
 function M.start()
@@ -257,10 +274,20 @@ function M.stop()
 	hs.notify.unregister(openDirectoryTag)
 end
 
-M.hotkeys = {
-	{ mods = { "ctrl" }, key = "a", action = M.area },
-	{ mods = { "ctrl" }, key = "w", action = M.window },
-	{ mods = { "ctrl" }, key = "s", action = M.screen },
-}
+M.hotkeys = {}
+for _, binding in ipairs({
+	{ key = "a", action = M.area },
+	{ key = "w", action = M.window },
+	{ key = "s", action = M.screen },
+}) do
+	M.hotkeys[#M.hotkeys + 1] = {
+		mods = { "ctrl" },
+		key = binding.key,
+		action = function()
+			binding.action(false)
+		end,
+	}
+	M.hotkeys[#M.hotkeys + 1] = { mods = { "ctrl", "shift" }, key = binding.key, action = binding.action }
+end
 
 return M
