@@ -18,6 +18,7 @@ vim.lsp.enable("sourcekit")
 require("mason-tool-installer").setup({
   ensure_installed = {
     "clangd", -- c lsp
+    "rust_analyzer", -- rust lsp
     "lua_ls", -- lua lsp
     "stylua", -- lua formatter
     "basedpyright", -- python lsp
