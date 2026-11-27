@@ -6,9 +6,16 @@ enum SelectionMode: String {
     case area, window
 }
 
-struct WindowTarget {
+struct WindowTarget: Decodable {
     let id: CGWindowID
-    let frame: NSRect
+    let x: CGFloat
+    let y: CGFloat
+    let w: CGFloat
+    let h: CGFloat
+
+    func frame(primaryTop: CGFloat) -> NSRect {
+        NSRect(x: x, y: primaryTop - y - h, width: w, height: h)
+    }
 }
 
 final class SelectionWindow: NSWindow {
@@ -116,11 +123,11 @@ final class SelectionController: NSObject, NSApplicationDelegate {
     let mode: SelectionMode
     private let previousApp = NSWorkspace.shared.frontmostApplication
     private var windows: [SelectionWindow] = []
-    private var targets: [WindowTarget] = []
+    private let targets: [WindowTarget]
     private var anchor: NSPoint?
     private var areaScreen: NSScreen?
     private var pressedWindow: CGWindowID?
-    private var hoveredWindow: WindowTarget?
+    private var hoveredWindowID: CGWindowID?
     private var signals: [DispatchSourceSignal] = []
     private var parentMonitor: DispatchSourceProcess?
     private var started = false
@@ -128,8 +135,9 @@ final class SelectionController: NSObject, NSApplicationDelegate {
     private var primaryTop: CGFloat = 0
     var selection: NSRect?
 
-    init(mode: SelectionMode) {
+    init(mode: SelectionMode, targets: [WindowTarget]) {
         self.mode = mode
+        self.targets = targets
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -138,13 +146,9 @@ final class SelectionController: NSObject, NSApplicationDelegate {
             return
         }
         primaryTop = primary.frame.maxY
-        // Capture the window order before our own overlays appear.
-        if mode == .window {
-            targets = visibleWindows()
-            if targets.isEmpty {
-                finish(reason: "no-windows")
-                return
-            }
+        if mode == .window, targets.isEmpty {
+            finish(reason: "no-windows")
+            return
         }
 
         for screen in NSScreen.screens {
@@ -189,26 +193,6 @@ final class SelectionController: NSObject, NSApplicationDelegate {
         parentMonitor = monitor
     }
 
-    private func visibleWindows() -> [WindowTarget] {
-        guard let info = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements],
-                                                   kCGNullWindowID) as? [[String: Any]] else { return [] }
-        return info.compactMap { item in
-            guard let number = item[kCGWindowNumber as String] as? NSNumber,
-                  let layer = item[kCGWindowLayer as String] as? NSNumber, layer.intValue == 0,
-                  let owner = item[kCGWindowOwnerPID as String] as? NSNumber,
-                  owner.int32Value != getpid(),
-                  let bounds = item[kCGWindowBounds as String] as? NSDictionary,
-                  let quartz = CGRect(dictionaryRepresentation: bounds),
-                  quartz.width > 1, quartz.height > 1 else { return nil }
-            if let alpha = item[kCGWindowAlpha as String] as? NSNumber, alpha.doubleValue <= 0 {
-                return nil
-            }
-            return WindowTarget(id: number.uint32Value,
-                                frame: NSRect(x: quartz.minX, y: primaryTop - quartz.maxY,
-                                              width: quartz.width, height: quartz.height))
-        }
-    }
-
     func pointerDown() {
         pointerMoved()
         if mode == .area {
@@ -216,7 +200,7 @@ final class SelectionController: NSObject, NSApplicationDelegate {
             areaScreen = NSScreen.screens.first(where: { $0.frame.contains(NSEvent.mouseLocation) })
             selection = nil
         } else {
-            pressedWindow = hoveredWindow?.id
+            pressedWindow = hoveredWindowID
         }
         redraw()
     }
@@ -224,8 +208,9 @@ final class SelectionController: NSObject, NSApplicationDelegate {
     func pointerMoved() {
         let point = NSEvent.mouseLocation
         if mode == .window {
-            hoveredWindow = targets.first(where: { $0.frame.contains(point) })
-            selection = hoveredWindow?.frame
+            let target = targets.first { $0.frame(primaryTop: primaryTop).contains(point) }
+            hoveredWindowID = target?.id
+            selection = target?.frame(primaryTop: primaryTop)
         } else if let anchor, let areaScreen {
             // Match the existing area capture: stay on the display where dragging began.
             let frame = areaScreen.frame
@@ -248,8 +233,8 @@ final class SelectionController: NSObject, NSApplicationDelegate {
                 return
             }
             finish(reason: "selected", rect: selection)
-        } else if let target = hoveredWindow, target.id == pressedWindow {
-            finish(reason: "selected", rect: target.frame, windowID: target.id)
+        } else if let id = hoveredWindowID, id == pressedWindow, let selection {
+            finish(reason: "selected", rect: selection, windowID: id)
         } else {
             pressedWindow = nil
         }
@@ -299,13 +284,26 @@ final class SelectionController: NSObject, NSApplicationDelegate {
     }
 }
 
-let argument = CommandLine.arguments.dropFirst().first ?? "area"
+let arguments = CommandLine.arguments.dropFirst()
+let argument = arguments.first ?? "area"
 guard let mode = SelectionMode(rawValue: argument) else {
-    FileHandle.standardError.write(Data("Usage: ScreenshotPicker [area|window]\n".utf8))
+    FileHandle.standardError.write(Data("Usage: ScreenshotPicker [area|window --targets-stdin]\n".utf8))
     exit(2)
 }
+let targets: [WindowTarget]
+if mode == .window {
+    guard arguments.dropFirst().first == "--targets-stdin",
+          let decoded = try? JSONDecoder().decode([WindowTarget].self,
+                                                  from: FileHandle.standardInput.readDataToEndOfFile()) else {
+        FileHandle.standardError.write(Data("ScreenshotPicker requires a JSON window list on stdin.\n".utf8))
+        exit(2)
+    }
+    targets = decoded
+} else {
+    targets = []
+}
 let app = NSApplication.shared
-let controller = SelectionController(mode: mode)
+let controller = SelectionController(mode: mode, targets: targets)
 app.setActivationPolicy(.accessory)
 app.delegate = controller
 app.run()

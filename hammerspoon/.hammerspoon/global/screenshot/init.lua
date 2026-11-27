@@ -37,36 +37,13 @@ local function canCapture(save)
 	return true
 end
 
-local function capture(target, kind, save, rect)
-	if not target then
-		reportError(save, "Screenshot failed", "No " .. kind .. " is available.")
-		return
-	end
-	if not canCapture(save) then
-		return
-	end
+local function snapshot(capture, ...)
+	local ok, image = pcall(capture, ...)
+	return ok and image or nil
+end
 
-	local captured, image = pcall(function()
-		local result
-		if kind == "window" then
-			result = hs.window.snapshotForID(target)
-		else
-			result = target:snapshot()
-		end
-		if result and rect then
-			local frame = target:fullFrame()
-			local size = result:size()
-			result = result:croppedCopy({
-				x = rect.x * size.w / frame.w,
-				y = rect.y * size.h / frame.h,
-				w = rect.w * size.w / frame.w,
-				h = rect.h * size.h / frame.h,
-			})
-		end
-		return result
-	end)
-
-	if not captured or not image then
+local function outputImage(image, kind, save)
+	if not image then
 		reportError(save, "Screenshot failed", "Could not capture the " .. kind .. ".")
 		return
 	end
@@ -126,7 +103,40 @@ local function selectionError(save, message, detail)
 	reportError(save, "Screenshot selection failed", message)
 end
 
-local function captureSelection(result, kind, save)
+local function snapshotDisplays()
+	local displays = {}
+	for _, screen in ipairs(hs.screen.allScreens()) do
+		local frame = screen:fullFrame()
+		local image = snapshot(screen.snapshot, screen)
+		if image then
+			displays[screen:id()] = { frame = frame, image = image }
+		end
+	end
+	return displays
+end
+
+local function snapshotWindows()
+	local images, targets = {}, {}
+	-- Keep Window Server order so hit testing starts with the frontmost window.
+	for _, window in ipairs(hs.window.list(true) or {}) do
+		local id = window.kCGWindowNumber
+		local bounds = window.kCGWindowBounds
+		if
+			id
+			and window.kCGWindowLayer == 0
+			and (window.kCGWindowAlpha or 1) > 0
+			and bounds
+			and bounds.Width > 1
+			and bounds.Height > 1
+		then
+			targets[#targets + 1] = { id = id, x = bounds.X, y = bounds.Y, w = bounds.Width, h = bounds.Height }
+			images[id] = snapshot(hs.window.snapshotForID, id)
+		end
+	end
+	return images, targets
+end
+
+local function outputSelection(result, kind, save, snapshots)
 	if result.status == "cancelled" then
 		if result.reason == "no-windows" then
 			selectionError(save, "No selectable windows are available.")
@@ -157,16 +167,19 @@ local function captureSelection(result, kind, save)
 			selectionError(save, "The screenshot picker returned an invalid window.")
 			return
 		end
-		capture(result.windowID, "window", save)
+		outputImage(snapshots[result.windowID], kind, save)
 	else
-		local screen = type(result.screenID) == "number" and hs.screen.find(result.screenID)
-		if not screen then
-			selectionError(save, "The selected display is no longer available.")
+		local display = type(result.screenID) == "number" and snapshots[result.screenID]
+		if not display then
+			selectionError(save, "Could not capture the selected display.")
 			return
 		end
-		local frame = screen:fullFrame()
+		local frame = display.frame
+		local screen = hs.screen.find(result.screenID)
 		if
-			rect.x < frame.x - 0.01
+			not screen
+			or screen:fullFrame() ~= frame
+			or rect.x < frame.x - 0.01
 			or rect.y < frame.y - 0.01
 			or rect.x + rect.w > frame.x + frame.w + 0.01
 			or rect.y + rect.h > frame.y + frame.h + 0.01
@@ -174,7 +187,14 @@ local function captureSelection(result, kind, save)
 			selectionError(save, "The display layout changed. Please select the area again.")
 			return
 		end
-		capture(screen, "area", save, screen:absoluteToLocal(rect))
+		local size = display.image:size()
+		local image = display.image:croppedCopy({
+			x = (rect.x - frame.x) * size.w / frame.w,
+			y = (rect.y - frame.y) * size.h / frame.h,
+			w = rect.w * size.w / frame.w,
+			h = rect.h * size.h / frame.h,
+		})
+		outputImage(image, kind, save)
 	end
 end
 
@@ -186,7 +206,12 @@ local function requestCapture(kind, save)
 		return
 	end
 	if kind == "screen" then
-		capture(hs.screen.mainScreen(), "screen", save)
+		local screen = hs.screen.mainScreen()
+		if screen then
+			outputImage(snapshot(screen.snapshot, screen), kind, save)
+		else
+			reportError(save, "Screenshot failed", "No screen is available.")
+		end
 		return
 	end
 	if not hs.fs.attributes(executable) then
@@ -194,7 +219,29 @@ local function requestCapture(kind, save)
 		return
 	end
 
-	local session = {}
+	-- Take every snapshot before the picker can cover the desktop or take focus.
+	local snapshots, input
+	if kind == "window" then
+		local targets
+		snapshots, targets = snapshotWindows()
+		if #targets == 0 then
+			selectionError(save, "No selectable windows are available.")
+			return
+		end
+		input = hs.json.encode(targets)
+	else
+		snapshots = snapshotDisplays()
+	end
+	if not next(snapshots) then
+		reportError(save, "Screenshot failed", "Could not capture any " .. (kind == "window" and "windows." or "displays."))
+		return
+	end
+	if kind == "window" and not input then
+		selectionError(save, "Could not prepare the window list.")
+		return
+	end
+
+	local session = { snapshots = snapshots }
 	picker = session
 	session.task = hs.task.new(executable, function(exitCode, stdout, stderr)
 		if picker ~= session then
@@ -207,6 +254,8 @@ local function requestCapture(kind, save)
 				return
 			end
 			picker = nil
+			local images = session.snapshots
+			session.snapshots = nil
 			if exitCode ~= 0 then
 				selectionError(
 					save,
@@ -221,15 +270,19 @@ local function requestCapture(kind, save)
 				return
 			end
 			local ok, message = xpcall(function()
-				captureSelection(result, kind, save)
+				outputSelection(result, kind, save, images)
 			end, debug.traceback)
 			if not ok then
 				selectionError(save, "Could not finish the screenshot. See Hammerspoon Console.", message)
 			end
 		end)
-	end, { kind })
+	end, input and { kind, "--targets-stdin" } or { kind })
+	if session.task and input then
+		session.task:setInput(input)
+	end
 	if not session.task or not session.task:start() then
 		picker = nil
+		session.snapshots = nil
 		selectionError(save, "Could not start the screenshot picker.")
 	end
 end
@@ -238,6 +291,7 @@ local function stopPicking()
 	local previous = picker
 	picker = nil
 	if previous then
+		previous.snapshots = nil
 		if previous.timer then
 			previous.timer:stop()
 		end
